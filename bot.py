@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import requests
+from requests import RequestException, HTTPError
 
 # =========================
 # CONFIG FROM ENVIRONMENT
@@ -64,11 +65,55 @@ def save_state(state: Dict[str, Any]) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
-def get_json(url: str, timeout: int = 20) -> Any:
-    headers = {"User-Agent": "solana-memecoin-telegram-screener/1.0"}
-    r = requests.get(url, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+def get_json(url: str, timeout: int = 20, retries: int = 3) -> Optional[Any]:
+    """
+    Ambil JSON dari API dengan retry.
+    Penting: jangan biarkan HTTP error dari Dexscreener membuat bot berhenti.
+    Jika API sedang rate-limit/maintenance, bot akan menunggu lalu lanjut cycle berikutnya.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 solana-memecoin-telegram-screener/1.1",
+        "Accept": "application/json",
+    }
+
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(url, headers=headers, timeout=timeout)
+            if r.status_code == 429:
+                retry_after = safe_int(r.headers.get("Retry-After"), 30)
+                wait_time = min(max(retry_after, 10), 120)
+                print(f"[DEX WARN] Rate limited 429. Wait {wait_time}s. URL={url}")
+                time.sleep(wait_time)
+                continue
+
+            if 500 <= r.status_code < 600:
+                wait_time = 10 * attempt
+                print(f"[DEX WARN] Server error {r.status_code}. Retry {attempt}/{retries} in {wait_time}s. URL={url}")
+                time.sleep(wait_time)
+                continue
+
+            r.raise_for_status()
+            return r.json()
+
+        except HTTPError as e:
+            status = getattr(e.response, "status_code", "unknown")
+            body = ""
+            try:
+                body = e.response.text[:300]
+            except Exception:
+                pass
+            print(f"[DEX HTTP ERROR] status={status} attempt={attempt}/{retries} URL={url} body={body}")
+            time.sleep(5 * attempt)
+
+        except RequestException as e:
+            print(f"[DEX REQUEST ERROR] attempt={attempt}/{retries} URL={url} error={e}")
+            time.sleep(5 * attempt)
+
+        except ValueError as e:
+            print(f"[DEX JSON ERROR] attempt={attempt}/{retries} URL={url} error={e}")
+            time.sleep(5 * attempt)
+
+    return None
 
 
 def send_telegram(text: str, chart_url: Optional[str] = None) -> None:
@@ -171,19 +216,46 @@ def choose_best_pair(pairs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def fetch_latest_solana_tokens() -> List[str]:
-    data = get_json(f"{DEX_BASE}/token-profiles/latest/v1")
-    if isinstance(data, dict):
-        data = [data]
-    tokens = []
-    for item in data:
-        if item.get("chainId") == "solana" and item.get("tokenAddress"):
-            tokens.append(item["tokenAddress"])
+    """
+    Ambil kandidat token Solana dari beberapa endpoint Dexscreener.
+    Jika satu endpoint error, endpoint lain tetap dicoba agar bot tidak berhenti.
+    """
+    endpoints = [
+        f"{DEX_BASE}/token-profiles/latest/v1",
+        f"{DEX_BASE}/token-boosts/latest/v1",
+        f"{DEX_BASE}/token-boosts/top/v1",
+    ]
+
+    tokens: List[str] = []
+
+    for url in endpoints:
+        data = get_json(url)
+        if data is None:
+            print(f"[DEX WARN] Endpoint gagal, dilewati: {url}")
+            continue
+
+        if isinstance(data, dict):
+            data = [data]
+
+        if not isinstance(data, list):
+            print(f"[DEX WARN] Format endpoint tidak dikenali, dilewati: {url}")
+            continue
+
+        for item in data:
+            if isinstance(item, dict) and item.get("chainId") == "solana" and item.get("tokenAddress"):
+                tokens.append(item["tokenAddress"])
+
+        if len(set(tokens)) >= MAX_TOKENS_PER_CYCLE:
+            break
+
     # Unique, preserve order
     return list(dict.fromkeys(tokens))[:MAX_TOKENS_PER_CYCLE]
 
 
 def fetch_pairs_for_token(token: str) -> List[Dict[str, Any]]:
     data = get_json(f"{DEX_BASE}/token-pairs/v1/solana/{token}")
+    if data is None:
+        return []
     if isinstance(data, list):
         return data
     if isinstance(data, dict) and isinstance(data.get("pairs"), list):
@@ -338,6 +410,10 @@ def process_cycle() -> None:
 
     alerts_sent = 0
 
+    if not tokens:
+        print(f"[{now_iso()}] Tidak ada token yang berhasil diambil. Kemungkinan API Dexscreener sedang limit/error. Bot akan coba lagi di cycle berikutnya.")
+        return
+
     for token in tokens:
         try:
             pairs = fetch_pairs_for_token(token)
@@ -402,7 +478,7 @@ def process_cycle() -> None:
 
 
 def main() -> None:
-    print("Solana Memecoin Telegram Screener started")
+    print("Solana Memecoin Telegram Screener v3 started")
     print(f"Interval: {CHECK_INTERVAL_SECONDS}s | Max tokens/cycle: {MAX_TOKENS_PER_CYCLE}")
     send_telegram("✅ Solana Memecoin Screener aktif. Bot mulai memantau token Solana dari Dexscreener.")
 
