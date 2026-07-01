@@ -28,6 +28,11 @@ NEW_MIN_PRICE_CHANGE_M5 = float(os.getenv("NEW_MIN_PRICE_CHANGE_M5", "3"))
 NEW_MAX_PRICE_CHANGE_M5 = float(os.getenv("NEW_MAX_PRICE_CHANGE_M5", "45"))
 NEW_MAX_MARKET_CAP_USD = float(os.getenv("NEW_MAX_MARKET_CAP_USD", "1500000"))
 
+# Global risk filter
+# Reject tokens whose 24h price change is below this value.
+# Example: -30 means reject tokens that dropped more than 30% in the last 24h.
+MIN_PRICE_CHANGE_H24 = float(os.getenv("MIN_PRICE_CHANGE_H24", "-30"))
+
 # Accumulation filter
 ACC_MIN_AGE_HOURS = float(os.getenv("ACC_MIN_AGE_HOURS", "24"))
 ACC_MIN_LIQUIDITY_USD = float(os.getenv("ACC_MIN_LIQUIDITY_USD", "20000"))
@@ -211,6 +216,8 @@ def score_new_coin(pair: Dict[str, Any], m: Dict[str, float], age_min: Optional[
     if 0 < m["market_cap"] <= NEW_MAX_MARKET_CAP_USD:
         score += 5
         reasons.append(f"mcap ${m['market_cap']:,.0f}")
+    if m["price_change_h24"] >= MIN_PRICE_CHANGE_H24:
+        reasons.append(f"24h tidak drop parah ({m['price_change_h24']:.1f}%)")
 
     passed = (
         age_min is not None and age_min <= NEW_MAX_AGE_MINUTES and
@@ -219,6 +226,7 @@ def score_new_coin(pair: Dict[str, Any], m: Dict[str, float], age_min: Optional[
         m["txns_m5"] >= NEW_MIN_TXNS_M5 and
         m["buy_sell_ratio_m5"] >= NEW_MIN_BUY_SELL_RATIO and
         NEW_MIN_PRICE_CHANGE_M5 <= m["price_change_m5"] <= NEW_MAX_PRICE_CHANGE_M5 and
+        m["price_change_h24"] >= MIN_PRICE_CHANGE_H24 and
         (m["market_cap"] == 0 or m["market_cap"] <= NEW_MAX_MARKET_CAP_USD)
     )
 
@@ -259,6 +267,8 @@ def score_accumulation(pair: Dict[str, Any], m: Dict[str, float], prev: Optional
     if liq_stability >= ACC_MIN_LIQUIDITY_STABILITY:
         score += 5
         reasons.append(f"liq stable {liq_stability:.2f}x")
+    if m["price_change_h24"] >= MIN_PRICE_CHANGE_H24:
+        reasons.append(f"24h tidak drop parah ({m['price_change_h24']:.1f}%)")
 
     passed = (
         age_hours >= ACC_MIN_AGE_HOURS and
@@ -267,6 +277,7 @@ def score_accumulation(pair: Dict[str, Any], m: Dict[str, float], prev: Optional
         vol_spike >= ACC_MIN_VOLUME_SPIKE_RATIO and
         m["buy_sell_ratio_h1"] >= ACC_MIN_BUY_SELL_RATIO and
         ACC_MIN_PRICE_CHANGE_H1 <= m["price_change_h1"] <= ACC_MAX_PRICE_CHANGE_H1 and
+        m["price_change_h24"] >= MIN_PRICE_CHANGE_H24 and
         liq_stability >= ACC_MIN_LIQUIDITY_STABILITY
     )
 
@@ -301,7 +312,7 @@ Market Cap/FDV: <b>${m['market_cap']:,.0f}</b>
 Vol 5m: <b>${m['volume_m5']:,.0f}</b> | Vol 1h: <b>${m['volume_h1']:,.0f}</b>
 Buy/Sell 5m: <b>{m['buys_m5']:.0f}/{m['sells_m5']:.0f}</b>
 Buy/Sell 1h: <b>{m['buys_h1']:.0f}/{m['sells_h1']:.0f}</b>
-Change 5m: <b>{m['price_change_m5']:.1f}%</b> | 1h: <b>{m['price_change_h1']:.1f}%</b>
+Change 5m: <b>{m['price_change_m5']:.1f}%</b> | 1h: <b>{m['price_change_h1']:.1f}%</b> | 24h: <b>{m['price_change_h24']:.1f}%</b>
 
 <b>Reasons:</b>
 {reason_text}
